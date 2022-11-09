@@ -3,7 +3,6 @@
 #include <linux/const.h>
 #include <linux/errno.h>
 #include <linux/fs.h>   /* Needed for KERN_INFO */
-#include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
@@ -21,6 +20,7 @@
 #include <asm/errno.h>
 #include "macro.h"
 #include "protovirt.h"
+#include "vmx.h"
 
 // guest vm stack size
 #define GUEST_STACK_SIZE 				64
@@ -50,8 +50,8 @@ bool vmxSupport(void)
     return false;
 
 }
-
-
+long int vmcsPhyRegion = 0;
+long int vmxon_phy_region = 0;
 // CH 23.7, Vol 3
 // Enter in VMX mode
 bool getVmxOperation(void) {
@@ -60,7 +60,7 @@ bool getVmxOperation(void) {
 	unsigned long cr0;
     uint64_t feature_control;
 	uint64_t required;
-	long int vmxon_phy_region = 0;
+	
 	u32 low1 = 0;
     // setting CR4.VMXE[bit 13] = 1
     __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4) : : "memory");
@@ -87,13 +87,13 @@ bool getVmxOperation(void) {
 	 * - Bit X is 0 in _FIXED1: bit X is fixed to 0 in CRx.
 	 */
 	__asm__ __volatile__("mov %%cr0, %0" : "=r"(cr0) : : "memory");
-	cr0 &= __rdmsr1(MSR_IA32_VMX_CR0_FIXED1);
 	cr0 |= __rdmsr1(MSR_IA32_VMX_CR0_FIXED0);
+	cr0 &= __rdmsr1(MSR_IA32_VMX_CR0_FIXED1);
 	__asm__ __volatile__("mov %0, %%cr0" : : "r"(cr0) : "memory");
 
 	__asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4) : : "memory");
-	cr4 &= __rdmsr1(MSR_IA32_VMX_CR4_FIXED1);
 	cr4 |= __rdmsr1(MSR_IA32_VMX_CR4_FIXED0);
+	cr4 &= __rdmsr1(MSR_IA32_VMX_CR4_FIXED1);
 	__asm__ __volatile__("mov %0, %%cr4" : : "r"(cr4) : "memory");
 
 	// allocating 4kib((4096 bytes) of memory for vmxon region
@@ -102,10 +102,16 @@ bool getVmxOperation(void) {
 		printk(KERN_INFO "Error allocating vmxon region\n");
       	return false;
    	}
+	// printk("vmxon region 0x%x\n",vmcs_revision_id());
 	vmxon_phy_region = __pa(vmxonRegion);
 	*(uint32_t *)vmxonRegion = vmcs_revision_id();
-	if (_vmxon(vmxon_phy_region))
-		return false;
+	int ret;
+	// asm volatile ("vmxoff\n" : : : "cc");
+
+	if (ret = _vmxon(vmxon_phy_region)){
+		printk("vmxon return %d\n", ret);
+		return true;
+	}
 	return true;
 }
 
@@ -113,7 +119,6 @@ bool getVmxOperation(void) {
 // CH 24.2, Vol 3
 // allocating VMCS region
 bool vmcsOperations(void) {
-	long int vmcsPhyRegion = 0;
 	if (allocVmcsRegion()){
 		vmcsPhyRegion = __pa(vmcsRegion);
 		*(uint32_t *)vmcsRegion = vmcs_revision_id();
@@ -217,23 +222,23 @@ bool initVmcsControlField(void) {
 
 	// CH 26.3, Vol 3
 	// setting the guest control area
-	vmwrite(GUEST_ES_SELECTOR, vmreadz(HOST_ES_SELECTOR));
-	vmwrite(GUEST_CS_SELECTOR, vmreadz(HOST_CS_SELECTOR));
-	vmwrite(GUEST_SS_SELECTOR, vmreadz(HOST_SS_SELECTOR));
-	vmwrite(GUEST_DS_SELECTOR, vmreadz(HOST_DS_SELECTOR));
-	vmwrite(GUEST_FS_SELECTOR, vmreadz(HOST_FS_SELECTOR));
-	vmwrite(GUEST_GS_SELECTOR, vmreadz(HOST_GS_SELECTOR));
+	vmwrite(GUEST_ES_SELECTOR, vmread(HOST_ES_SELECTOR));
+	vmwrite(GUEST_CS_SELECTOR, vmread(HOST_CS_SELECTOR));
+	vmwrite(GUEST_SS_SELECTOR, vmread(HOST_SS_SELECTOR));
+	vmwrite(GUEST_DS_SELECTOR, vmread(HOST_DS_SELECTOR));
+	vmwrite(GUEST_FS_SELECTOR, vmread(HOST_FS_SELECTOR));
+	vmwrite(GUEST_GS_SELECTOR, vmread(HOST_GS_SELECTOR));
 	vmwrite(GUEST_LDTR_SELECTOR, 0);
-	vmwrite(GUEST_TR_SELECTOR, vmreadz(HOST_TR_SELECTOR));
+	vmwrite(GUEST_TR_SELECTOR, vmread(HOST_TR_SELECTOR));
 	vmwrite(GUEST_INTR_STATUS, 0);
 	vmwrite(GUEST_PML_INDEX, 0);
 
 	vmwrite(VMCS_LINK_POINTER, -1ll);
 	vmwrite(GUEST_IA32_DEBUGCTL, 0);
-	vmwrite(GUEST_IA32_PAT, vmreadz(HOST_IA32_PAT));
-	vmwrite(GUEST_IA32_EFER, vmreadz(HOST_IA32_EFER));
+	vmwrite(GUEST_IA32_PAT, vmread(HOST_IA32_PAT));
+	vmwrite(GUEST_IA32_EFER, vmread(HOST_IA32_EFER));
 	vmwrite(GUEST_IA32_PERF_GLOBAL_CTRL,
-		vmreadz(HOST_IA32_PERF_GLOBAL_CTRL));
+		vmread(HOST_IA32_PERF_GLOBAL_CTRL));
 
 	vmwrite(GUEST_ES_LIMIT, -1);
 	vmwrite(GUEST_CS_LIMIT, -1);
@@ -246,38 +251,38 @@ bool initVmcsControlField(void) {
 	vmwrite(GUEST_GDTR_LIMIT, 0xffff);
 	vmwrite(GUEST_IDTR_LIMIT, 0xffff);
 	vmwrite(GUEST_ES_AR_BYTES,
-		vmreadz(GUEST_ES_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_ES_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_CS_AR_BYTES, 0xa09b);
 	vmwrite(GUEST_SS_AR_BYTES, 0xc093);
 	vmwrite(GUEST_DS_AR_BYTES,
-		vmreadz(GUEST_DS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_DS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_FS_AR_BYTES,
-		vmreadz(GUEST_FS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_FS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_GS_AR_BYTES,
-		vmreadz(GUEST_GS_SELECTOR) == 0 ? 0x10000 : 0xc093);
+		vmread(GUEST_GS_SELECTOR) == 0 ? 0x10000 : 0xc093);
 	vmwrite(GUEST_LDTR_AR_BYTES, 0x10000);
 	vmwrite(GUEST_TR_AR_BYTES, 0x8b);
 	vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
 	vmwrite(GUEST_ACTIVITY_STATE, 0);
-	vmwrite(GUEST_SYSENTER_CS, vmreadz(HOST_IA32_SYSENTER_CS));
+	vmwrite(GUEST_SYSENTER_CS, vmread(HOST_IA32_SYSENTER_CS));
 	vmwrite(VMX_PREEMPTION_TIMER_VALUE, 0);
 
-	vmwrite(GUEST_CR0, vmreadz(HOST_CR0));
-	vmwrite(GUEST_CR3, vmreadz(HOST_CR3));
-	vmwrite(GUEST_CR4, vmreadz(HOST_CR4));
+	vmwrite(GUEST_CR0, vmread(HOST_CR0));
+	vmwrite(GUEST_CR3, vmread(HOST_CR3));
+	vmwrite(GUEST_CR4, vmread(HOST_CR4));
 	vmwrite(GUEST_ES_BASE, 0);
 	vmwrite(GUEST_CS_BASE, 0);
 	vmwrite(GUEST_SS_BASE, 0);
 	vmwrite(GUEST_DS_BASE, 0);
-	vmwrite(GUEST_FS_BASE, vmreadz(HOST_FS_BASE));
-	vmwrite(GUEST_GS_BASE, vmreadz(HOST_GS_BASE));
+	vmwrite(GUEST_FS_BASE, vmread(HOST_FS_BASE));
+	vmwrite(GUEST_GS_BASE, vmread(HOST_GS_BASE));
 	vmwrite(GUEST_LDTR_BASE, 0);
-	vmwrite(GUEST_TR_BASE, vmreadz(HOST_TR_BASE));
-	vmwrite(GUEST_GDTR_BASE, vmreadz(HOST_GDTR_BASE));
-	vmwrite(GUEST_IDTR_BASE, vmreadz(HOST_IDTR_BASE));
+	vmwrite(GUEST_TR_BASE, vmread(HOST_TR_BASE));
+	vmwrite(GUEST_GDTR_BASE, vmread(HOST_GDTR_BASE));
+	vmwrite(GUEST_IDTR_BASE, vmread(HOST_IDTR_BASE));
 	vmwrite(GUEST_RFLAGS, 2);
-	vmwrite(GUEST_SYSENTER_ESP, vmreadz(HOST_IA32_SYSENTER_ESP));
-	vmwrite(GUEST_SYSENTER_EIP, vmreadz(HOST_IA32_SYSENTER_EIP));
+	vmwrite(GUEST_SYSENTER_ESP, vmread(HOST_IA32_SYSENTER_ESP));
+	vmwrite(GUEST_SYSENTER_EIP, vmread(HOST_IA32_SYSENTER_EIP));
 	// setting up rip and rsp for guest
 	void *costum_rip;
 	void *costum_rsp;
@@ -287,7 +292,29 @@ bool initVmcsControlField(void) {
 	costum_rip = guest_code;
 	vmwrite(GUEST_RSP, (uint64_t)costum_rsp);
 	vmwrite(GUEST_RIP, (uint64_t)costum_rip);
+	vmwrite(0x400a, 5);
 
+    // enum VMX_error_code is_vmentry_error = VMenterLoadCheckVmControls();
+    // if (! is_vmentry_error){
+    //     printk("VMCS CHECK: VMX CONTROLS OK!\n");
+    // }else{
+    //     printk("VMCS CHECK: VMX CONTROLS ERROR %0d\n", is_vmentry_error);
+    // }
+    // is_vmentry_error = VMenterLoadCheckHostState();
+    // if (! is_vmentry_error){
+    // 	printk("VMCS CHECK: HOST STATE OK!\n");
+    // }else{
+    //     printk("VMCS CHECK: HOST STATE ERROR %0d\n", is_vmentry_error);
+    // }
+    // uint32_t qualification;
+
+    // uint32_t is_error = VMenterLoadCheckGuestState(&qualification, vmcsPhyRegion, vmxon_phy_region);
+    // if (! is_error){
+    //     printk("VMCS CHECK: GUEST STATE OK!\n");
+    // }else{
+    //     printk("VMCS CHECK: GUEST STATE ERROR %0d\n", qualification);
+    //     printk("VMCS CHECK: GUEST STATE ERROR %0d\n", is_error);
+    // }
 	return true;
 }
 

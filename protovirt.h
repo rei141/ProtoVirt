@@ -1,5 +1,5 @@
 #include "macro.h"
-
+#include "vmx.h"
 // vmxon region
 uint64_t *vmxonRegion = NULL;
 //vmcs region
@@ -14,72 +14,6 @@ struct desc64 {
 	uint32_t base3;
 	uint32_t zero1;
 } __attribute__((packed));
-
-
-static inline unsigned long long notrace __rdmsr1(unsigned int msr)
-{
-	DECLARE_ARGS(val, low, high);
-
-	asm volatile("1: rdmsr\n"
-		     "2:\n"
-		     _ASM_EXTABLE_HANDLE(1b, 2b, ex_handler_rdmsr_unsafe)
-		     : EAX_EDX_RET(val, low, high) : "c" (msr));
-
-	return EAX_EDX_VAL(val, low, high);
-}
-
-// CH 30.3, Vol 3
-// VMXON instruction - Enter VMX operation
-static inline int _vmxon(uint64_t phys)
-{
-	uint8_t ret;
-
-	__asm__ __volatile__ ("vmxon %[pa]; setna %[ret]"
-		: [ret]"=rm"(ret)
-		: [pa]"m"(phys)
-		: "cc", "memory");
-	return ret;
-}
-
-// CH 24.11.2, Vol 3
-static inline int vmread(uint64_t encoding, uint64_t *value)
-{
-	uint64_t tmp;
-	uint8_t ret;
-	/*
-	if (enable_evmcs)
-		return evmcs_vmread(encoding, value);
-	*/
-	__asm__ __volatile__("vmread %[encoding], %[value]; setna %[ret]"
-		: [value]"=rm"(tmp), [ret]"=rm"(ret)
-		: [encoding]"r"(encoding)
-		: "cc", "memory");
-
-	*value = tmp;
-	return ret;
-}
-/*
- * A wrapper around vmread (taken from kvm vmx.c) that ignores errors
- * and returns zero if the vmread instruction fails.
- */
-static inline uint64_t vmreadz(uint64_t encoding)
-{
-	uint64_t value = 0;
-	vmread(encoding, &value);
-	return value;
-}
-
-static inline int vmwrite(uint64_t encoding, uint64_t value)
-{
-	uint8_t ret;
-	__asm__ __volatile__ ("vmwrite %[value], %[encoding]; setna %[ret]"
-		: [ret]"=rm"(ret)
-		: [value]"rm"(value), [encoding]"r"(encoding)
-		: "cc", "memory");
-
-	return ret;
-}
-
 
 // CH 24.2, Vol 3
 // getting vmcs revision identifier
@@ -269,7 +203,7 @@ static inline uint64_t get_idt_base1(void)
 // CH 27.2.1, Vol 3
 // Basic VM exit reason
 uint32_t vmExit_reason(void) {
-	uint32_t exit_reason = vmreadz(VM_EXIT_REASON);
+	uint32_t exit_reason = vmread(VM_EXIT_REASON);
 	exit_reason = exit_reason & 0xffff;
 	return exit_reason;
 }
